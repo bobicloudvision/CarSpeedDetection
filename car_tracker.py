@@ -88,6 +88,7 @@ class CarTracker:
         self.enable_plate_detection = True
         self.plate_detection_frequency = 10  # Check plates every N frames
         self.frame_count = 0  # Track frame count for processing decisions
+        self.strict_detection = False  # Flag for strict detection mode
 
         
         # Number plate detection parameters
@@ -239,24 +240,83 @@ class CarTracker:
                 # Convert to grayscale for better detection
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
-                # Detect cars using Haar cascade
-                cascade_cars = self.car_cascade.detectMultiScale(
-                    gray, 
-                    scaleFactor=1.05,      # How much to scale image between detections
-                    minNeighbors=3,        # Minimum neighbors for detection confidence
-                    minSize=(30, 30),      # Minimum car size
-                    maxSize=(500, 500)     # Maximum car size
-                )
+                # Detect cars using Haar cascade with stricter parameters
+                if self.strict_detection:
+                    # Ultra-strict mode for minimal false positives
+                    cascade_cars = self.car_cascade.detectMultiScale(
+                        gray, 
+                        scaleFactor=1.2,       # Even larger scale factor
+                        minNeighbors=7,        # Very high confidence threshold
+                        minSize=(80, 80),      # Larger minimum size
+                        maxSize=(300, 300)     # Smaller maximum size
+                    )
+                else:
+                    # Standard strict mode
+                    cascade_cars = self.car_cascade.detectMultiScale(
+                        gray, 
+                        scaleFactor=1.1,       # Larger scale factor = fewer false positives
+                        minNeighbors=5,        # Higher confidence threshold
+                        minSize=(50, 50),      # Larger minimum size to avoid small objects
+                        maxSize=(400, 400)     # Smaller maximum size to avoid oversized detections
+                    )
                 
-                # Add detected cars to list
+                raw_detections = len(cascade_cars)
+                
+                # Add detected cars to list with additional filtering
                 for (x, y, w, h) in cascade_cars:
-                    cars.append((x, y, w, h))
+                    # Additional size validation (more lenient)
+                    if w >= 30 and h >= 30 and w <= 500 and h <= 500:
+                        # Check aspect ratio (cars are typically wider than tall, but more flexible)
+                        aspect_ratio = w / float(h)
+                        if 0.8 <= aspect_ratio <= 4.0:  # More flexible car proportions
+                            cars.append((x, y, w, h))
+                
+                # Remove overlapping detections (keep the largest one)
+                if len(cars) > 1:
+                    cars = self._remove_overlapping_detections(cars)
+                
+                filtered_detections = len(cars)
+                
+                # Debug info (uncomment to see detection counts)
+                print(f"🔍 Raw detections: {raw_detections}, Filtered: {filtered_detections}")
                     
             except Exception as e:
                 print(f"Error in Haar cascade detection: {e}")
                 pass
         
         return cars
+    
+    def _remove_overlapping_detections(self, detections):
+        """Remove overlapping detections, keeping the largest one"""
+        if len(detections) <= 1:
+            return detections
+        
+        # Sort by area (largest first)
+        detections = sorted(detections, key=lambda d: d[2] * d[3], reverse=True)
+        
+        filtered = []
+        for detection in detections:
+            x1, y1, w1, h1 = detection
+            is_overlapping = False
+            
+            for existing in filtered:
+                x2, y2, w2, h2 = existing
+                
+                # Calculate overlap
+                overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+                overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                overlap_area = overlap_x * overlap_y
+                
+                # If overlap is more than 50% of smaller detection, consider it overlapping (less strict)
+                smaller_area = min(w1 * h1, w2 * h2)
+                if overlap_area > 0.5 * smaller_area:
+                    is_overlapping = True
+                    break
+            
+            if not is_overlapping:
+                filtered.append(detection)
+        
+        return filtered
         
     def detect_number_plate(self, frame, car_bbox):
         """Detect number plate within car bounding box - OPTIMIZED"""
@@ -654,6 +714,8 @@ def main():
                        help='Disable interactive line setup mode')
     parser.add_argument('--no-plate-detection', action='store_true',
                        help='Disable number plate detection for better performance')
+    parser.add_argument('--strict-detection', action='store_true',
+                       help='Use even stricter car detection parameters')
     
     args = parser.parse_args()
     
@@ -670,6 +732,9 @@ def main():
         if args.no_plate_detection:
             tracker.enable_plate_detection = False
             print("📱 Number plate detection disabled")
+        if args.strict_detection:
+            tracker.strict_detection = True
+            print("🔒 Strict detection mode enabled (minimal false positives)")
         
         # Disable interactive mode if requested
         if args.no_interactive:

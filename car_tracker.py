@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 import time
 import math
-import os
 import argparse
 from ultralytics import YOLO
 
@@ -13,6 +12,7 @@ class VirtualLine:
         self.x2, self.y2 = x2, y2
         self.name = name
         self.crossed_cars = {}  # Track cars that crossed this line
+        self.max_crossing_history = 50  # Maximum number of crossing records to keep
         
     def draw(self, frame):
         """Draw the virtual line on the frame"""
@@ -52,6 +52,37 @@ class VirtualLine:
         # Update current side
         self.crossed_cars[car_id]['side'] = current_side
         return False
+    
+    def cleanup_old_crossings(self):
+        """Clean up old crossing records to prevent memory bloat"""
+        if len(self.crossed_cars) <= self.max_crossing_history:
+            return
+        
+        # Remove oldest crossing records
+        current_time = time.time()
+        crossing_times = []
+        
+        for car_id, crossing_data in self.crossed_cars.items():
+            if crossing_data['cross_time']:
+                crossing_times.append((car_id, crossing_data['cross_time']))
+        
+        # Sort by crossing time (oldest first)
+        crossing_times.sort(key=lambda x: x[1])
+        
+        # Remove oldest records
+        records_to_remove = len(self.crossed_cars) - self.max_crossing_history
+        removed_count = 0
+        
+        for car_id, cross_time in crossing_times:
+            if removed_count >= records_to_remove:
+                break
+            
+            del self.crossed_cars[car_id]
+            removed_count += 1
+        
+        if removed_count > 0:
+            if hasattr(self, 'debug_logging') and self.debug_logging:
+                print(f"🧹 Cleaned up {removed_count} old crossing records from {self.name}")
 
 class CarTracker:
     def __init__(self, video_path=None, camera_index=0):
@@ -67,6 +98,8 @@ class CarTracker:
         self.next_track_id = 0
         self.max_disappeared = 30  # Max frames a car can disappear
         self.min_distance = 50  # Minimum distance to consider as same car
+        self.max_track_history = 100  # Maximum number of tracks to keep in memory
+        self.cleanup_interval = 60  # Cleanup every N frames
         
         # Speed estimation parameters
         self.fps = 30  # Assumed FPS, will be updated from video
@@ -85,12 +118,14 @@ class CarTracker:
         # Performance optimization flags
         self.enable_plate_detection = False  # Disabled for performance
         self.frame_count = 0  # Track frame count for processing decisions
-        self.confidence_threshold = 0.5  # YOLO confidence threshold
+        self.confidence_threshold = 0.5  # YOLO detection confidence threshold
         
         # GPU acceleration and timing optimization
         self.use_gpu_acceleration = True
         self.frame_timing = True  # Maintain original video timing
         self.last_frame_time = 0  # For precise timing
+        self.performance_monitoring = False  # Disable performance monitoring by default for performance
+        self.debug_logging = False  # Disable debug logging by default for performance
         
         # Car detection with YOLO
         try:
@@ -296,6 +331,54 @@ class CarTracker:
     
 
         
+    def cleanup_old_tracks(self):
+        """Clean up old tracks to prevent memory bloat and improve performance"""
+        if len(self.car_tracks) <= self.max_track_history:
+            return
+        
+        # Sort tracks by last seen time (most recent first)
+        current_time = time.time()
+        track_times = []
+        
+        for track_id, track_info in self.car_tracks.items():
+            # Calculate time since last seen
+            if track_info['disappeared'] > 0:
+                # Track is currently disappeared
+                last_seen = current_time - (track_info['disappeared'] / self.fps)
+            else:
+                # Track is currently visible
+                last_seen = current_time
+            
+            track_times.append((track_id, last_seen, track_info['disappeared']))
+        
+        # Sort by last seen time (oldest first)
+        track_times.sort(key=lambda x: x[1])
+        
+        # Remove oldest tracks until we're under the limit
+        tracks_to_remove = len(self.car_tracks) - self.max_track_history
+        removed_count = 0
+        
+        for track_id, last_seen, disappeared in track_times:
+            if removed_count >= tracks_to_remove:
+                break
+            
+            # Remove the track
+            del self.car_tracks[track_id]
+            removed_count += 1
+            
+            # Also clean up from virtual lines
+            for line in self.virtual_lines:
+                if track_id in line.crossed_cars:
+                    del line.crossed_cars[track_id]
+        
+        if removed_count > 0:
+            if self.debug_logging:
+                print(f"🧹 Cleaned up {removed_count} old tracks (memory optimization)")
+        
+        # Also cleanup virtual lines
+        for line in self.virtual_lines:
+            line.cleanup_old_crossings()
+    
     def update_tracks(self, cars):
         """Update car tracks and assign IDs"""
         # If no cars detected, mark all tracks as disappeared
@@ -407,22 +490,24 @@ class CarTracker:
                 if self.virtual_lines[0].check_crossing(car_center, car_id, frame_time):
                     track_info['line1_crossed'] = True
                     track_info['line1_time'] = frame_time
-                    print(f"🚗 Car {car_id} crossed Line 1 at {frame_time:.2f}s")
+                    if self.debug_logging:
+                        print(f"🚗 Car {car_id} crossed Line 1 at {frame_time:.2f}s")
             
             # Check line 2 crossing
             if track_info['line1_crossed'] and not track_info['line2_crossed']:
                 if self.virtual_lines[1].check_crossing(car_center, car_id, frame_time):
                     track_info['line2_crossed'] = True
                     track_info['line2_time'] = frame_time
-                    print(f"🏁 Car {car_id} crossed Line 2 at {frame_time:.2f}s")
                     
                     # Calculate speed
                     speed = self.calculate_speed_from_lines(car_id)
                     track_info['speed'] = speed
-                    print(f"⚡ Car {car_id} speed: {speed:.1f} km/h")
+                    if self.debug_logging:
+                        print(f"🏁 Car {car_id} crossed Line 2 at {frame_time:.2f}s")
+                        print(f"⚡ Car {car_id} speed: {speed:.1f} km/h")
                     
             # Debug: Show line crossing status
-            if track_info['line1_crossed'] and not track_info['line2_crossed']:
+            if self.debug_logging and track_info['line1_crossed'] and not track_info['line2_crossed']:
                 print(f"🔄 Car {car_id} waiting to cross Line 2...")
         
     def process_frame(self, frame):
@@ -492,22 +577,17 @@ class CarTracker:
             
             ret, frame = self.cap.read()
             if not ret:
-                # Loop video if it's a file
-                if self.video_path:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = self.cap.read()
-                    if not ret:
-                        break
-                    # Reset timing for looped video
-                    start_time = time.time()
-                    self.last_frame_time = start_time
-                else:
-                    break
+                # Video ended, exit the program
+                break
                 
             self.frame_count += 1
             
             # Process every frame for detection and tracking
             processed_frame = self.process_frame(frame)
+            
+            # Periodic cleanup to prevent memory bloat
+            if self.frame_count % self.cleanup_interval == 0:
+                self.cleanup_old_tracks()
             
             # Calculate timing information
             current_time = time.time()
@@ -540,6 +620,12 @@ class CarTracker:
             if self.use_gpu_acceleration:
                 cv2.putText(processed_frame, f"GPU: ON", (10, 200),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            # Add memory usage info
+            if self.performance_monitoring:
+                memory_info = f"Tracks: {len(self.car_tracks)}/{self.max_track_history}"
+                cv2.putText(processed_frame, memory_info, (10, 225),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
             # Add interactive mode instructions
             if self.interactive_mode:
@@ -626,6 +712,14 @@ def main():
                        help='Disable GPU acceleration for better compatibility')
     parser.add_argument('--no-timing', action='store_true',
                        help='Disable frame timing for maximum performance')
+    parser.add_argument('--max-tracks', type=int, default=100,
+                       help='Maximum number of car tracks to keep in memory (default: 100)')
+    parser.add_argument('--cleanup-interval', type=int, default=60,
+                       help='Cleanup old tracks every N frames (default: 60)')
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable debug logging (may impact performance)')
+    parser.add_argument('--monitor', action='store_true',
+                       help='Enable performance monitoring (may impact performance)')
 
     
     args = parser.parse_args()
@@ -658,6 +752,23 @@ def main():
         if args.no_timing:
             tracker.frame_timing = False
             print("Frame timing disabled.")
+        
+        # Set new parameters
+        tracker.max_track_history = args.max_tracks
+        tracker.cleanup_interval = args.cleanup_interval
+        print(f"🎯 Car tracker parameters updated:")
+        print(f"  Max Tracks: {tracker.max_track_history}")
+        print(f"  Cleanup Interval: {tracker.cleanup_interval} frames")
+        
+        # Enable debug logging if requested
+        if args.debug:
+            tracker.debug_logging = True
+            print("🐛 Debug logging enabled (may impact performance)")
+        
+        # Enable performance monitoring if requested
+        if args.monitor:
+            tracker.performance_monitoring = True
+            print("📊 Performance monitoring enabled (may impact performance)")
         
         tracker.run()
     except KeyboardInterrupt:

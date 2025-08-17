@@ -3,4 +3,5 @@ numpy
 pytesseract
 ultralytics
 torch
-torchvision 
+torchvision
+matplotlib 

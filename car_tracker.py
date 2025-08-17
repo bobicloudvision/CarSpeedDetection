@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import pytesseract
 import time
 import math
 import os
@@ -84,17 +83,10 @@ class CarTracker:
         self.current_setup_line = 0  # 0 for line 1, 1 for line 2
         
         # Performance optimization flags
-        self.enable_plate_detection = True
-        self.plate_detection_frequency = 10  # Check plates every N frames
+        self.enable_plate_detection = False  # Disabled for performance
         self.frame_count = 0  # Track frame count for processing decisions
         self.confidence_threshold = 0.5  # YOLO confidence threshold
 
-
-        
-        # Number plate detection parameters
-        self.min_plate_area = 1000
-        self.max_plate_area = 50000
-        
 
         
         # Car detection with YOLO
@@ -259,89 +251,6 @@ class CarTracker:
     
 
         
-    def detect_number_plate(self, frame, car_bbox):
-        """Detect number plate within car bounding box - OPTIMIZED"""
-        x, y, w, h = car_bbox
-        
-        # OPTIMIZATION: Skip small cars to avoid processing tiny regions
-        if w < 50 or h < 30:
-            return []
-        
-        # Extract car region
-        car_region = frame[y:y+h, x:x+w]
-        
-        # OPTIMIZATION: Resize car region to reduce processing time
-        if w > 200 or h > 150:
-            scale_factor = min(200.0/w, 150.0/h)
-            new_w = int(w * scale_factor)
-            new_h = int(h * scale_factor)
-            car_region = cv2.resize(car_region, (new_w, new_h))
-        
-        # Convert to HSV for better color segmentation
-        hsv = cv2.cvtColor(car_region, cv2.COLOR_BGR2HSV)
-        
-        # Define range for white color (typical for number plates)
-        lower_white = np.array([0, 0, 200])
-        upper_white = np.array([180, 30, 255])
-        
-        # Create mask for white regions
-        white_mask = cv2.inRange(hsv, lower_white, upper_white)
-        
-        # OPTIMIZATION: Limit contour search to avoid slowdown
-        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        plates = []
-        # OPTIMIZATION: Process only first 10 contours
-        max_plate_contours = min(10, len(contours))
-        for i in range(max_plate_contours):
-            contour = contours[i]
-            area = cv2.contourArea(contour)
-            if self.min_plate_area < area < self.max_plate_area:
-                x_plate, y_plate, w_plate, h_plate = cv2.boundingRect(contour)
-                aspect_ratio = w_plate / float(h_plate)
-                
-                # Number plates typically have aspect ratio around 2.5-4.0
-                if 2.0 < aspect_ratio < 5.0:
-                    plates.append((x_plate, y_plate, w_plate, h_plate))
-        
-        return plates
-        
-    def read_number_plate(self, frame, plate_bbox, car_bbox):
-        """Read text from detected number plate using OCR"""
-        x_car, y_car, w_car, h_car = car_bbox
-        x_plate, y_plate, w_plate, h_plate = plate_bbox
-        
-        # Extract plate region (relative to original frame)
-        plate_x = x_car + x_plate
-        plate_y = y_car + y_plate
-        plate_region = frame[plate_y:plate_y+h_plate, plate_x:plate_x+w_plate]
-        
-        # Preprocess plate image for better OCR
-        gray_plate = cv2.cvtColor(plate_region, cv2.COLOR_BGR2GRAY)
-        
-        # Apply thresholding
-        _, thresh = cv2.threshold(gray_plate, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Apply morphological operations
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-        
-        # Resize for better OCR
-        processed = cv2.resize(processed, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        
-        try:
-            # OCR configuration for number plates
-            config = '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-            text = pytesseract.image_to_string(processed, config=config)
-            
-            # Clean up the text
-            text = ''.join(c for c in text if c.isalnum())
-            
-            return text if len(text) >= 4 else None
-        except Exception as e:
-            print(f"OCR Error: {e}")
-            return None
-            
     def update_tracks(self, cars):
         """Update car tracks and assign IDs"""
         # If no cars detected, mark all tracks as disappeared
@@ -362,7 +271,6 @@ class CarTracker:
                     'center': (car[0] + car[2]//2, car[1] + car[3]//2),
                     'disappeared': 0,
                     'speed': 0,
-                    'plate_number': None,
                     'first_seen': time.time(),
                     'line1_crossed': False,
                     'line2_crossed': False,
@@ -422,7 +330,6 @@ class CarTracker:
                         'center': car_centers[i],
                         'disappeared': 0,
                         'speed': 0,
-                        'plate_number': None,
                         'first_seen': time.time(),
                         'line1_crossed': False,
                         'line2_crossed': False,
@@ -490,7 +397,6 @@ class CarTracker:
             bbox = track_info['bbox']
             center = track_info['center']
             speed = track_info['speed']
-            plate_number = track_info['plate_number']
             
             # Draw bounding box
             x, y, w, h = bbox
@@ -505,35 +411,6 @@ class CarTracker:
             speed_color = (255, 0, 0) if speed > 0 else (128, 128, 128)  # Red if speed > 0, gray if 0
             cv2.putText(frame, speed_text, (x, y + h + 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, speed_color, 2)
-            
-            # Try to detect number plate if not already found - OPTIMIZED
-            if plate_number is None and self.enable_plate_detection:
-                # OPTIMIZATION: Only check plates every N frames for better performance
-                if self.frame_count % self.plate_detection_frequency == 0:
-                    plates = self.detect_number_plate(frame, bbox)
-                    if plates:
-                        # Use the largest plate
-                        largest_plate = max(plates, key=lambda p: p[2] * p[3])
-                        plate_text = self.read_number_plate(frame, largest_plate, bbox)
-                        
-                        if plate_text:
-                            track_info['plate_number'] = plate_text
-                            plate_number = plate_text
-            
-            # Draw plate number if found
-            if plate_number:
-                cv2.putText(frame, f"Plate: {plate_number}", (x, y + h + 40),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                
-                # Draw plate bounding box
-                plates = self.detect_number_plate(frame, bbox)
-                if plates:
-                    largest_plate = max(plates, key=lambda p: p[2] * p[3])
-                    x_plate, y_plate, w_plate, h_plate = largest_plate
-                    cv2.rectangle(frame, 
-                                (x + x_plate, y + y_plate),
-                                (x + x_plate + w_plate, y + y_plate + h_plate),
-                                (0, 0, 255), 2)
         
         # Draw virtual lines
         for line in self.virtual_lines:
@@ -653,8 +530,6 @@ def main():
                        help='Position of second line as ratio of frame height (0.0-1.0, default: 0.6)')
     parser.add_argument('--no-interactive', action='store_true',
                        help='Disable interactive line setup mode')
-    parser.add_argument('--no-plate-detection', action='store_true',
-                       help='Disable number plate detection for better performance')
     parser.add_argument('--confidence', type=float, default=0.5,
                        help='YOLO detection confidence threshold (0.0-1.0, default: 0.5)')
 
@@ -671,13 +546,9 @@ def main():
             tracker.set_line_positions(args.line1_pos, args.line2_pos)
         
         # Performance tuning - simplified
-        if args.no_plate_detection:
-            tracker.enable_plate_detection = False
-            print("📱 Number plate detection disabled")
         if args.confidence != 0.5:
             tracker.confidence_threshold = args.confidence
             print(f"🎯 YOLO confidence threshold set to {args.confidence}")
-
         
         # Disable interactive mode if requested
         if args.no_interactive:

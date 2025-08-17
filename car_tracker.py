@@ -125,6 +125,7 @@ class CarTracker:
         self.frame_timing = True  # Maintain original video timing
         self.performance_monitoring = False  # Disable performance monitoring by default for performance
         self.debug_logging = False  # Disable debug logging by default for performance
+        self.use_front_bumper = False  # Use front bumper detection instead of center
         
         # Car detection with YOLO
         try:
@@ -449,22 +450,73 @@ class CarTracker:
                     return speed_kmh
         return 0
     
+    def get_front_bumper_position(self, car_id):
+        """Calculate the front bumper position of a car based on its movement direction"""
+        track_info = self.car_tracks[car_id]
+        bbox = track_info['bbox']
+        x, y, w, h = bbox
+        
+        # Get current center position
+        current_center = track_info['center']
+        
+        # Try to determine car direction from previous positions
+        if 'previous_center' in track_info:
+            prev_center = track_info['previous_center']
+            
+            # Calculate movement direction (which way the car is moving)
+            dx = current_center[0] - prev_center[0]  # Horizontal movement
+            dy = current_center[1] - prev_center[1]  # Vertical movement
+            
+            # Determine if car is moving left-to-right or right-to-left
+            if abs(dx) > abs(dy):  # Horizontal movement is dominant
+                if dx > 0:  # Moving right (east)
+                    # Front bumper is on the right side
+                    front_x = x + w
+                    front_y = y + h // 2
+                else:  # Moving left (west)
+                    # Front bumper is on the left side
+                    front_x = x
+                    front_y = y + h // 2
+            else:  # Vertical movement is dominant
+                if dy > 0:  # Moving down (south)
+                    # Front bumper is on the bottom
+                    front_x = x + w // 2
+                    front_y = y + h
+                else:  # Moving up (north)
+                    # Front bumper is on the top
+                    front_x = x + w // 2
+                    front_y = y
+        else:
+            # If no previous position, assume car is moving right (common for traffic)
+            front_x = x + w
+            front_y = y + h // 2
+        
+        # Store current center for next frame
+        track_info['previous_center'] = current_center
+        
+        return (front_x, front_y)
+    
     def check_line_crossings(self, frame_time):
-        """Check if cars have crossed the virtual lines"""
+        """Check if cars have crossed the virtual lines using front bumper detection"""
         for car_id, track_info in self.car_tracks.items():
-            car_center = track_info['center']
+            # Choose between front bumper and center detection
+            if self.use_front_bumper:
+                detection_point = self.get_front_bumper_position(car_id)
+            else:
+                detection_point = track_info['center']
             
             # Check line 1 crossing
             if not track_info['line1_crossed']:
-                if self.virtual_lines[0].check_crossing(car_center, car_id, frame_time):
+                if self.virtual_lines[0].check_crossing(detection_point, car_id, frame_time):
                     track_info['line1_crossed'] = True
                     track_info['line1_time'] = frame_time
                     if self.debug_logging:
-                        print(f"🚗 Car {car_id} crossed Line 1 at {frame_time:.2f}s")
+                        point_type = "front bumper" if self.use_front_bumper else "center"
+                        print(f"🚗 Car {car_id} {point_type} crossed Line 1 at {frame_time:.2f}s")
             
             # Check line 2 crossing
             if track_info['line1_crossed'] and not track_info['line2_crossed']:
-                if self.virtual_lines[1].check_crossing(car_center, car_id, frame_time):
+                if self.virtual_lines[1].check_crossing(detection_point, car_id, frame_time):
                     track_info['line2_crossed'] = True
                     track_info['line2_time'] = frame_time
                     
@@ -472,7 +524,8 @@ class CarTracker:
                     speed = self.calculate_speed_from_lines(car_id)
                     track_info['speed'] = speed
                     if self.debug_logging:
-                        print(f"🏁 Car {car_id} crossed Line 2 at {frame_time:.2f}s")
+                        point_type = "front bumper" if self.use_front_bumper else "center"
+                        print(f"🏁 Car {car_id} {point_type} crossed Line 2 at {frame_time:.2f}s")
                         print(f"⚡ Car {car_id} speed: {speed:.1f} km/h")
                     
             # Debug: Show line crossing status
@@ -565,6 +618,11 @@ class CarTracker:
             cv2.putText(processed_frame, f"Cars with Speed: {cars_with_speed}/{len(self.car_tracks)}", (10, 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
+            # Add detection method info
+            detection_method = "Front Bumper" if self.use_front_bumper else "Car Center"
+            cv2.putText(processed_frame, f"Detection: {detection_method}", (10, 175),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
             # Add interactive mode instructions
             if self.interactive_mode:
                 if self.current_setup_line == 0:
@@ -650,6 +708,8 @@ def main():
                        help='Enable debug logging (may impact performance)')
     parser.add_argument('--monitor', action='store_true',
                        help='Enable performance monitoring (may impact performance)')
+    parser.add_argument('--front-bumper', action='store_true',
+                       help='Use front bumper detection instead of car center for more accurate speed measurement')
 
     
     args = parser.parse_args()
@@ -689,6 +749,11 @@ def main():
         if args.monitor:
             tracker.performance_monitoring = True
             print("📊 Performance monitoring enabled (may impact performance)")
+        
+        # Enable front bumper detection if requested
+        if args.front_bumper:
+            tracker.use_front_bumper = True
+            print("🚗 Front bumper detection enabled for more accurate speed measurement")
         
         tracker.run()
     except KeyboardInterrupt:

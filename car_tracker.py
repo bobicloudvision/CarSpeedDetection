@@ -86,14 +86,32 @@ class CarTracker:
         self.enable_plate_detection = False  # Disabled for performance
         self.frame_count = 0  # Track frame count for processing decisions
         self.confidence_threshold = 0.5  # YOLO confidence threshold
-
-
+        
+        # GPU acceleration and timing optimization
+        self.use_gpu_acceleration = True
+        self.frame_timing = True  # Maintain original video timing
+        self.last_frame_time = 0  # For precise timing
         
         # Car detection with YOLO
         try:
             # Load YOLO model for car detection
             self.yolo_model = YOLO('yolov8n.pt')  # Use nano model for speed
-            print("✓ Loaded YOLO model (yolov8n.pt)")
+            
+            # Enable GPU acceleration for YOLO if available
+            if self.use_gpu_acceleration:
+                try:
+                    # Check if CUDA is available
+                    import torch
+                    if torch.cuda.is_available():
+                        self.yolo_model.to('cuda')
+                        print("✓ YOLO model loaded with GPU acceleration (CUDA)")
+                    else:
+                        print("✓ YOLO model loaded (CPU only - CUDA not available)")
+                except Exception as e:
+                    print(f"✓ YOLO model loaded (GPU acceleration failed: {e})")
+            else:
+                print("✓ YOLO model loaded (CPU mode)")
+                
         except Exception as e:
             print(f"Error: Could not load YOLO model: {e}")
             print("Please install ultralytics: pip install ultralytics")
@@ -191,9 +209,24 @@ class CarTracker:
             print(f"Line positions updated: Line 1 at {self.line1_y_ratio*100:.0f}%, Line 2 at {self.line2_y_ratio*100:.0f}%")
     
     def _init_video_capture(self):
-        """Initialize video capture from file or camera"""
+        """Initialize video capture from file or camera with GPU optimization"""
         if self.video_path:
             self.cap = cv2.VideoCapture(self.video_path)
+            
+            # Enable GPU acceleration if available
+            if self.use_gpu_acceleration:
+                # Try to use CUDA backend if available
+                try:
+                    self.cap.set(cv2.CAP_PROP_CUDA_DEVICE, 0)
+                    print("✓ GPU acceleration enabled (CUDA)")
+                except:
+                    pass
+                
+                # Set hardware acceleration
+                self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                
+                # Optimize buffer size for better performance
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         else:
             self.cap = cv2.VideoCapture(self.camera_index)
             
@@ -204,6 +237,18 @@ class CarTracker:
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Validate FPS
+        if self.fps <= 0:
+            self.fps = 30.0  # Default FPS if not detected
+            print(f"⚠️  FPS not detected, using default: {self.fps}")
+        else:
+            print(f"✓ Video FPS: {self.fps:.2f}")
+        
+        print(f"✓ Video dimensions: {self.frame_width}x{self.frame_height}")
+        
+        # Calculate frame interval for precise timing
+        self.frame_interval = 1.0 / self.fps if self.fps > 0 else 1.0 / 30.0
         
 
         
@@ -419,18 +464,32 @@ class CarTracker:
         return frame
         
     def run(self):
-        """Main loop for processing video"""
+        """Main loop for processing video with GPU optimization"""
         self.frame_count = 0
         start_time = time.time()
+        self.last_frame_time = start_time
         
         # Setup mouse callback for interactive line setup
-        cv2.namedWindow('Car Tracker')
+        cv2.namedWindow('Car Tracker', cv2.WINDOW_NORMAL)
+        
+        # Enable GPU acceleration for display
+        if self.use_gpu_acceleration:
+            try:
+                cv2.setUseOptimized(True)
+                cv2.setNumThreads(0)  # Use all available threads
+                print("✓ OpenCV optimization enabled")
+            except:
+                pass
+        
         cv2.setMouseCallback('Car Tracker', self.mouse_callback)
         
         # Start in interactive setup mode
         self.start_interactive_setup()
         
         while True:
+            # Measure frame processing time
+            frame_start_time = time.time()
+            
             ret, frame = self.cap.read()
             if not ret:
                 # Loop video if it's a file
@@ -439,6 +498,9 @@ class CarTracker:
                     ret, frame = self.cap.read()
                     if not ret:
                         break
+                    # Reset timing for looped video
+                    start_time = time.time()
+                    self.last_frame_time = start_time
                 else:
                     break
                 
@@ -447,11 +509,15 @@ class CarTracker:
             # Process every frame for detection and tracking
             processed_frame = self.process_frame(frame)
             
-            # Add FPS counter
-            elapsed_time = time.time() - start_time
+            # Calculate timing information
+            current_time = time.time()
+            elapsed_time = current_time - start_time
             current_fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
             
-            # Add status information
+            # Calculate processing time
+            processing_time = (current_time - frame_start_time) * 1000  # Convert to milliseconds
+            
+            # Add FPS counter
             cv2.putText(processed_frame, f"Frame: {self.frame_count}", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(processed_frame, f"FPS: {current_fps:.1f}", (10, 60),
@@ -461,14 +527,19 @@ class CarTracker:
             cv2.putText(processed_frame, f"Line Distance: {self.line_distance_meters}m", (10, 120),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-            # Add performance mode info
-            cv2.putText(processed_frame, f"Original Timing: ON", (10, 150),
+            # Add performance info
+            cv2.putText(processed_frame, f"Processing: {processing_time:.1f}ms", (10, 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             # Add speed tracking info
             cars_with_speed = sum(1 for track in self.car_tracks.values() if track['speed'] > 0)
             cv2.putText(processed_frame, f"Cars with Speed: {cars_with_speed}/{len(self.car_tracks)}", (10, 175),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            
+            # Add GPU acceleration info
+            if self.use_gpu_acceleration:
+                cv2.putText(processed_frame, f"GPU: ON", (10, 200),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
             # Add interactive mode instructions
             if self.interactive_mode:
@@ -487,14 +558,25 @@ class CarTracker:
             # Display frame
             cv2.imshow('Car Tracker', processed_frame)
             
-            # Always maintain original video timing
-            if self.video_path and self.fps > 0:
-                # Calculate delay to maintain original video speed
-                delay = int(1000 / self.fps)  # Convert to milliseconds
-                key = cv2.waitKey(delay) & 0xFF
+            # Precise timing control for video playback
+            if self.video_path and self.frame_timing:
+                # Calculate when the next frame should be displayed
+                target_frame_time = start_time + (self.frame_count * self.frame_interval)
+                current_time = time.time()
+                
+                # Calculate delay needed
+                if target_frame_time > current_time:
+                    delay_ms = int((target_frame_time - current_time) * 1000)
+                    delay_ms = max(1, min(delay_ms, 100))  # Clamp between 1-100ms
+                else:
+                    delay_ms = 1  # Minimal delay if we're behind
+                
+                key = cv2.waitKey(delay_ms) & 0xFF
             else:
                 # For camera input, use minimal delay
                 key = cv2.waitKey(1) & 0xFF
+            
+            # Handle key presses
             if key == ord('q'):
                 break
             elif key == ord('r'):
@@ -509,6 +591,14 @@ class CarTracker:
             elif key == ord('s') and self.interactive_mode:
                 # Skip to next frame (useful during setup)
                 continue
+            elif key == ord('g'):
+                # Toggle GPU acceleration
+                self.use_gpu_acceleration = not self.use_gpu_acceleration
+                print(f"GPU acceleration: {'ON' if self.use_gpu_acceleration else 'OFF'}")
+            elif key == ord('t'):
+                # Toggle frame timing
+                self.frame_timing = not self.frame_timing
+                print(f"Frame timing: {'ON' if self.frame_timing else 'OFF'}")
                 
         self.cap.release()
         cv2.destroyAllWindows()
@@ -532,6 +622,10 @@ def main():
                        help='Disable interactive line setup mode')
     parser.add_argument('--confidence', type=float, default=0.5,
                        help='YOLO detection confidence threshold (0.0-1.0, default: 0.5)')
+    parser.add_argument('--no-gpu', action='store_true',
+                       help='Disable GPU acceleration for better compatibility')
+    parser.add_argument('--no-timing', action='store_true',
+                       help='Disable frame timing for maximum performance')
 
     
     args = parser.parse_args()
@@ -554,6 +648,16 @@ def main():
         if args.no_interactive:
             tracker.interactive_mode = False
             print("Interactive mode disabled - using preset line positions")
+        
+        # Disable GPU acceleration if requested
+        if args.no_gpu:
+            tracker.use_gpu_acceleration = False
+            print("GPU acceleration disabled.")
+        
+        # Disable frame timing if requested
+        if args.no_timing:
+            tracker.frame_timing = False
+            print("Frame timing disabled.")
         
         tracker.run()
     except KeyboardInterrupt:

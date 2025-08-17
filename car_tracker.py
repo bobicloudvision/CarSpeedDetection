@@ -8,6 +8,53 @@ import os
 from collections import deque
 import argparse
 
+class VirtualLine:
+    def __init__(self, x1, y1, x2, y2, name="Line"):
+        """Initialize a virtual line for speed detection"""
+        self.x1, self.y1 = x1, y1
+        self.x2, self.y2 = x2, y2
+        self.name = name
+        self.crossed_cars = {}  # Track cars that crossed this line
+        
+    def draw(self, frame):
+        """Draw the virtual line on the frame"""
+        cv2.line(frame, (self.x1, self.y1), (self.x2, self.y2), (0, 255, 255), 2)
+        cv2.putText(frame, self.name, (self.x1, self.y1 - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    
+    def check_crossing(self, car_center, car_id, frame_time):
+        """Check if a car has crossed this line"""
+        # Calculate which side of the line the car is on
+        # Using cross product to determine side
+        line_vector = (self.x2 - self.x1, self.y2 - self.y1)
+        car_vector = (car_center[0] - self.x1, car_center[1] - self.y1)
+        
+        # Cross product to determine side
+        cross_product = line_vector[0] * car_vector[1] - line_vector[1] * car_vector[0]
+        
+        # If car hasn't been tracked for this line yet, initialize
+        if car_id not in self.crossed_cars:
+            self.crossed_cars[car_id] = {
+                'side': 'left' if cross_product > 0 else 'right',
+                'crossed': False,
+                'cross_time': None
+            }
+            return False
+        
+        current_side = 'left' if cross_product > 0 else 'right'
+        previous_side = self.crossed_cars[car_id]['side']
+        
+        # Check if car crossed the line (changed sides)
+        if current_side != previous_side and not self.crossed_cars[car_id]['crossed']:
+            self.crossed_cars[car_id]['crossed'] = True
+            self.crossed_cars[car_id]['cross_time'] = frame_time
+            self.crossed_cars[car_id]['side'] = current_side
+            return True
+        
+        # Update current side
+        self.crossed_cars[car_id]['side'] = current_side
+        return False
+
 class CarTracker:
     def __init__(self, video_path=None, camera_index=0):
         """
@@ -27,6 +74,24 @@ class CarTracker:
         self.fps = 30  # Assumed FPS, will be updated from video
         self.pixel_to_meter_ratio = 0.1  # Calibration factor
         self.speed_history = deque(maxlen=10)
+        
+        # Virtual lines for speed detection
+        self.virtual_lines = []
+        self.line_distance_meters = 10.0  # Distance between lines in meters
+        self.line1_y_ratio = 0.4  # Line 1 position (40% from top)
+        self.line2_y_ratio = 0.6  # Line 2 position (60% from top)
+        
+        # Interactive line setup
+        self.interactive_mode = False
+        self.line_setup_points = []
+        self.current_setup_line = 0  # 0 for line 1, 1 for line 2
+        
+        # Performance optimization flags
+        self.enable_plate_detection = True
+        self.plate_detection_frequency = 10  # Check plates every N frames
+        self.enable_haar_cascade = False  # Disable by default for better performance
+        self.frame_count = 0  # Track frame count for processing decisions
+
         
         # Number plate detection parameters
         self.min_plate_area = 1000
@@ -65,6 +130,94 @@ class CarTracker:
         # Initialize video capture
         self._init_video_capture()
         
+        # Setup virtual lines
+        self._setup_virtual_lines()
+        
+    def _setup_virtual_lines(self):
+        """Setup virtual lines for speed detection"""
+        if self.frame_width > 0 and self.frame_height > 0:
+            # Create two horizontal lines across the road
+            line1_y = int(self.frame_height * self.line1_y_ratio)
+            line2_y = int(self.frame_height * self.line2_y_ratio)
+            
+            self.virtual_lines = [
+                VirtualLine(0, line1_y, self.frame_width, line1_y, "Start Line"),
+                VirtualLine(0, line2_y, self.frame_width, line2_y, "Finish Line")
+            ]
+            print(f"✓ Virtual lines set up: {self.line_distance_meters}m apart")
+            print(f"  Line 1 at {self.line1_y_ratio*100:.0f}% of frame height")
+            print(f"  Line 2 at {self.line2_y_ratio*100:.0f}% of frame height")
+        else:
+            print("Warning: Cannot setup virtual lines - video dimensions unknown")
+    
+    def start_interactive_setup(self):
+        """Start interactive line setup mode"""
+        self.interactive_mode = True
+        self.line_setup_points = []
+        self.current_setup_line = 0
+        print("🎯 Interactive line setup mode activated!")
+        print("Click to set Line 1 (Start Line) position")
+        print("Press 'r' to reset, 'q' to quit setup mode")
+    
+    def mouse_callback(self, event, x, y, flags, param):
+        """Mouse callback for interactive line setup"""
+        if not self.interactive_mode:
+            return
+            
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if self.current_setup_line == 0:
+                # Setting Line 1 (Start Line)
+                self.line_setup_points = [(0, y), (self.frame_width, y)]
+                self.current_setup_line = 1
+                print(f"✓ Line 1 set at y={y} ({(y/self.frame_height)*100:.1f}% of frame)")
+                print("Now click to set Line 2 (Finish Line) position")
+            elif self.current_setup_line == 1:
+                # Setting Line 2 (Finish Line)
+                line2_points = [(0, y), (self.frame_width, y)]
+                
+                # Ensure Line 2 is below Line 1
+                if y <= self.line_setup_points[0][1]:
+                    print("⚠️  Line 2 must be below Line 1. Please click below Line 1.")
+                    return
+                
+                # Update virtual lines
+                self.virtual_lines[0] = VirtualLine(*self.line_setup_points[0], *self.line_setup_points[1], "Start Line")
+                self.virtual_lines[1] = VirtualLine(*line2_points[0], *line2_points[1], "Finish Line")
+                
+                # Update ratios
+                self.line1_y_ratio = self.line_setup_points[0][1] / self.frame_height
+                self.line2_y_ratio = y / self.frame_height
+                
+                print(f"✓ Line 2 set at y={y} ({(y/self.frame_height)*100:.1f}% of frame)")
+                print(f"✓ Virtual lines updated! Distance: {self.line_distance_meters}m")
+                print("Press 's' to start tracking or 'q' to quit")
+                
+                self.interactive_mode = False
+    
+    def set_line_distance(self, distance_meters):
+        """Set the distance between virtual lines in meters"""
+        self.line_distance_meters = distance_meters
+        print(f"Line distance updated to {distance_meters}m")
+    
+    def set_line_positions(self, line1_ratio, line2_ratio):
+        """Set the vertical positions of the lines (0.0 to 1.0)"""
+        self.line1_y_ratio = max(0.1, min(0.9, line1_ratio))
+        self.line2_y_ratio = max(0.1, min(0.9, line2_ratio))
+        
+        # Ensure line2 is below line1
+        if self.line2_y_ratio <= self.line1_y_ratio:
+            self.line2_y_ratio = min(0.9, self.line1_y_ratio + 0.1)
+        
+        # Recalculate line positions
+        if self.frame_width > 0 and self.frame_height > 0:
+            line1_y = int(self.frame_height * self.line1_y_ratio)
+            line2_y = int(self.frame_height * self.line2_y_ratio)
+            
+            self.virtual_lines[0] = VirtualLine(0, line1_y, self.frame_width, line1_y, "Start Line")
+            self.virtual_lines[1] = VirtualLine(0, line2_y, self.frame_width, line2_y, "Finish Line")
+            
+            print(f"Line positions updated: Line 1 at {self.line1_y_ratio*100:.0f}%, Line 2 at {self.line2_y_ratio*100:.0f}%")
+    
     def _init_video_capture(self):
         """Initialize video capture from file or camera"""
         if self.video_path:
@@ -98,18 +251,21 @@ class CarTracker:
         """Detect cars in the frame using multiple methods"""
         cars = []
         
-        # Method 1: Background subtraction (primary method)
+        # Method 1: Background subtraction (primary method) - OPTIMIZED
         fg_mask = self.bg_subtractor.apply(frame)
         
-        # Apply morphological operations to clean up the mask
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # OPTIMIZATION: Use smaller kernel and reduce morphological operations
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # Reduced from (5,5)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
+        # OPTIMIZATION: Removed MORPH_OPEN operation for better performance
         
-        # Find contours
+        # Find contours with optimized parameters
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        for contour in contours:
+        # OPTIMIZATION: Process only first 20 contours to avoid slowdown
+        max_contours = min(20, len(contours))
+        for i in range(max_contours):
+            contour = contours[i]
             area = cv2.contourArea(contour)
             if area > 800:  # Lower threshold for better detection
                 x, y, w, h = cv2.boundingRect(contour)
@@ -121,8 +277,8 @@ class CarTracker:
                     if w > 30 and h > 20:
                         cars.append((x, y, w, h))
         
-        # Method 2: Haar cascade (if available, as backup)
-        if self.car_cascade is not None:
+        # Method 2: Haar cascade (if available, as backup) - OPTIMIZED
+        if self.enable_haar_cascade and self.car_cascade is not None:
             try:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 cascade_cars = self.car_cascade.detectMultiScale(
@@ -135,39 +291,30 @@ class CarTracker:
                 # Silently continue with background subtraction only
                 pass
         
-        # Remove duplicate detections (simple overlap check)
-        if len(cars) > 1:
-            filtered_cars = []
-            for i, car1 in enumerate(cars):
-                is_duplicate = False
-                for j, car2 in enumerate(cars):
-                    if i != j:
-                        # Check overlap
-                        x1, y1, w1, h1 = car1
-                        x2, y2, w2, h2 = car2
-                        
-                        # Calculate overlap area
-                        overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
-                        overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
-                        overlap_area = overlap_x * overlap_y
-                        
-                        if overlap_area > 0.5 * min(w1 * h1, w2 * h2):
-                            is_duplicate = True
-                            break
-                
-                if not is_duplicate:
-                    filtered_cars.append(car1)
-            
-            cars = filtered_cars
+        # OPTIMIZATION: Simplified duplicate removal - only check if more than 5 cars
+        if len(cars) > 5:
+            # Simple area-based filtering instead of complex overlap calculation
+            cars = sorted(cars, key=lambda c: c[2] * c[3], reverse=True)[:5]
         
         return cars
         
     def detect_number_plate(self, frame, car_bbox):
-        """Detect number plate within car bounding box"""
+        """Detect number plate within car bounding box - OPTIMIZED"""
         x, y, w, h = car_bbox
+        
+        # OPTIMIZATION: Skip small cars to avoid processing tiny regions
+        if w < 50 or h < 30:
+            return []
         
         # Extract car region
         car_region = frame[y:y+h, x:x+w]
+        
+        # OPTIMIZATION: Resize car region to reduce processing time
+        if w > 200 or h > 150:
+            scale_factor = min(200.0/w, 150.0/h)
+            new_w = int(w * scale_factor)
+            new_h = int(h * scale_factor)
+            car_region = cv2.resize(car_region, (new_w, new_h))
         
         # Convert to HSV for better color segmentation
         hsv = cv2.cvtColor(car_region, cv2.COLOR_BGR2HSV)
@@ -179,11 +326,14 @@ class CarTracker:
         # Create mask for white regions
         white_mask = cv2.inRange(hsv, lower_white, upper_white)
         
-        # Find contours in the white mask
+        # OPTIMIZATION: Limit contour search to avoid slowdown
         contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         plates = []
-        for contour in contours:
+        # OPTIMIZATION: Process only first 10 contours
+        max_plate_contours = min(10, len(contours))
+        for i in range(max_plate_contours):
+            contour = contours[i]
             area = cv2.contourArea(contour)
             if self.min_plate_area < area < self.max_plate_area:
                 x_plate, y_plate, w_plate, h_plate = cv2.boundingRect(contour)
@@ -252,7 +402,11 @@ class CarTracker:
                     'disappeared': 0,
                     'speed': 0,
                     'plate_number': None,
-                    'first_seen': time.time()
+                    'first_seen': time.time(),
+                    'line1_crossed': False,
+                    'line2_crossed': False,
+                    'line1_time': None,
+                    'line2_time': None
                 }
                 self.next_track_id += 1
         else:
@@ -283,10 +437,6 @@ class CarTracker:
                     old_center = self.car_tracks[track_id]['center']
                     new_center = car_centers[car_idx]
                     
-                    # Calculate speed
-                    speed = self._calculate_speed(old_center, new_center)
-                    self.car_tracks[track_id]['speed'] = speed
-                    
                     # Update track
                     self.car_tracks[track_id]['bbox'] = cars[car_idx]
                     self.car_tracks[track_id]['center'] = new_center
@@ -312,28 +462,51 @@ class CarTracker:
                         'disappeared': 0,
                         'speed': 0,
                         'plate_number': None,
-                        'first_seen': time.time()
+                        'first_seen': time.time(),
+                        'line1_crossed': False,
+                        'line2_crossed': False,
+                        'line1_time': None,
+                        'line2_time': None
                     }
                     self.next_track_id += 1
                     
-    def _calculate_speed(self, old_center, new_center):
-        """Calculate speed based on pixel movement"""
-        dx = new_center[0] - old_center[0]
-        dy = new_center[1] - old_center[1]
+    def calculate_speed_from_lines(self, car_id):
+        """Calculate speed based on time between crossing two virtual lines"""
+        track_info = self.car_tracks[car_id]
         
-        # Calculate distance in pixels
-        distance_pixels = math.sqrt(dx**2 + dy**2)
-        
-        # Convert to meters using calibration factor
-        distance_meters = distance_pixels * self.pixel_to_meter_ratio
-        
-        # Calculate speed in m/s
-        speed = distance_meters * self.fps
-        
-        # Convert to km/h
-        speed_kmh = speed * 3.6
-        
-        return speed_kmh
+        if track_info['line1_crossed'] and track_info['line2_crossed']:
+            if track_info['line1_time'] and track_info['line2_time']:
+                time_diff = abs(track_info['line2_time'] - track_info['line1_time'])
+                if time_diff > 0:
+                    # Speed = distance / time
+                    speed_mps = self.line_distance_meters / time_diff
+                    speed_kmh = speed_mps * 3.6
+                    return speed_kmh
+        return 0
+    
+    def check_line_crossings(self, frame_time):
+        """Check if cars have crossed the virtual lines"""
+        for car_id, track_info in self.car_tracks.items():
+            car_center = track_info['center']
+            
+            # Check line 1 crossing
+            if not track_info['line1_crossed']:
+                if self.virtual_lines[0].check_crossing(car_center, car_id, frame_time):
+                    track_info['line1_crossed'] = True
+                    track_info['line1_time'] = frame_time
+                    print(f"Car {car_id} crossed Line 1 at {frame_time:.2f}s")
+            
+            # Check line 2 crossing
+            if track_info['line1_crossed'] and not track_info['line2_crossed']:
+                if self.virtual_lines[1].check_crossing(car_center, car_id, frame_time):
+                    track_info['line2_crossed'] = True
+                    track_info['line2_time'] = frame_time
+                    print(f"Car {car_id} crossed Line 2 at {frame_time:.2f}s")
+                    
+                    # Calculate speed
+                    speed = self.calculate_speed_from_lines(car_id)
+                    track_info['speed'] = speed
+                    print(f"Car {car_id} speed: {speed:.1f} km/h")
         
     def process_frame(self, frame):
         """Process a single frame for car tracking and number plate recognition"""
@@ -342,6 +515,10 @@ class CarTracker:
         
         # Update tracks
         self.update_tracks(cars)
+        
+        # Check line crossings
+        frame_time = time.time()
+        self.check_line_crossings(frame_time)
         
         # Process each tracked car
         for track_id, track_info in self.car_tracks.items():
@@ -359,20 +536,23 @@ class CarTracker:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             # Draw speed
-            cv2.putText(frame, f"Speed: {speed:.1f} km/h", (x, y + h + 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            if speed > 0:
+                cv2.putText(frame, f"Speed: {speed:.1f} km/h", (x, y + h + 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
             
-            # Try to detect number plate if not already found
-            if plate_number is None:
-                plates = self.detect_number_plate(frame, bbox)
-                if plates:
-                    # Use the largest plate
-                    largest_plate = max(plates, key=lambda p: p[2] * p[3])
-                    plate_text = self.read_number_plate(frame, largest_plate, bbox)
-                    
-                    if plate_text:
-                        track_info['plate_number'] = plate_text
-                        plate_number = plate_text
+            # Try to detect number plate if not already found - OPTIMIZED
+            if plate_number is None and self.enable_plate_detection:
+                # OPTIMIZATION: Only check plates every N frames for better performance
+                if self.frame_count % self.plate_detection_frequency == 0:
+                    plates = self.detect_number_plate(frame, bbox)
+                    if plates:
+                        # Use the largest plate
+                        largest_plate = max(plates, key=lambda p: p[2] * p[3])
+                        plate_text = self.read_number_plate(frame, largest_plate, bbox)
+                        
+                        if plate_text:
+                            track_info['plate_number'] = plate_text
+                            plate_number = plate_text
             
             # Draw plate number if found
             if plate_number:
@@ -389,50 +569,99 @@ class CarTracker:
                                 (x + x_plate + w_plate, y + y_plate + h_plate),
                                 (0, 0, 255), 2)
         
+        # Draw virtual lines
+        for line in self.virtual_lines:
+            line.draw(frame)
+        
         return frame
         
     def run(self):
         """Main loop for processing video"""
-        frame_count = 0
+        self.frame_count = 0
         start_time = time.time()
         
-        print("Starting video processing...")
-        print("Press 'q' to quit")
+        # Setup mouse callback for interactive line setup
+        cv2.namedWindow('Car Tracker')
+        cv2.setMouseCallback('Car Tracker', self.mouse_callback)
+        
+        # Start in interactive setup mode
+        self.start_interactive_setup()
         
         while True:
             ret, frame = self.cap.read()
             if not ret:
-                print(f"End of video reached at frame {frame_count}")
-                break
+                # Loop video if it's a file
+                if self.video_path:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        break
+                else:
+                    break
                 
-            frame_count += 1
+            self.frame_count += 1
             
-            if frame_count % 30 == 0:  # Print every 30 frames
-                print(f"Processing frame {frame_count}")
-            
-            # Process frame
+            # Process every frame for detection and tracking
             processed_frame = self.process_frame(frame)
             
-            # Add frame counter and FPS
+            # Add FPS counter
             elapsed_time = time.time() - start_time
-            current_fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+            current_fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
             
-            cv2.putText(processed_frame, f"Frame: {frame_count}", (10, 30),
+            # Add status information
+            cv2.putText(processed_frame, f"Frame: {self.frame_count}", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(processed_frame, f"FPS: {current_fps:.1f}", (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(processed_frame, f"Cars: {len(self.car_tracks)}", (10, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(processed_frame, f"Line Distance: {self.line_distance_meters}m", (10, 120),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Add performance mode info
+            cv2.putText(processed_frame, f"Original Timing: ON", (10, 150),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Add interactive mode instructions
+            if self.interactive_mode:
+                if self.current_setup_line == 0:
+                    cv2.putText(processed_frame, "Click to set Line 1 (Start Line)", (10, self.frame_height - 60),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                elif self.current_setup_line == 1:
+                    cv2.putText(processed_frame, "Click to set Line 2 (Finish Line)", (10, self.frame_height - 60),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.putText(processed_frame, "Press 'r' to reset, 'q' to quit", (10, self.frame_height - 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            else:
+                cv2.putText(processed_frame, "Press 'i' for interactive setup, 'r' to reset lines, 'q' to quit", 
+                           (10, self.frame_height - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
             # Display frame
             cv2.imshow('Car Tracker', processed_frame)
             
-            # Break on 'q' key
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("User pressed 'q', exiting...")
+            # Always maintain original video timing
+            if self.video_path and self.fps > 0:
+                # Calculate delay to maintain original video speed
+                delay = int(1000 / self.fps)  # Convert to milliseconds
+                key = cv2.waitKey(delay) & 0xFF
+            else:
+                # For camera input, use minimal delay
+                key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('r'):
+                # Reset lines to default positions
+                self.line1_y_ratio = 0.4
+                self.line2_y_ratio = 0.6
+                self._setup_virtual_lines()
+                print("✓ Lines reset to default positions")
+            elif key == ord('i') and not self.interactive_mode:
+                # Start interactive setup
+                self.start_interactive_setup()
+            elif key == ord('s') and self.interactive_mode:
+                # Skip to next frame (useful during setup)
+                continue
                 
-        print(f"Total frames processed: {frame_count}")
         self.cap.release()
         cv2.destroyAllWindows()
         
@@ -445,11 +674,62 @@ def main():
     parser = argparse.ArgumentParser(description='Car Tracking with Number Plate Recognition')
     parser.add_argument('--video', type=str, help='Path to video file')
     parser.add_argument('--camera', type=int, default=0, help='Camera index (default: 0)')
+    parser.add_argument('--line-distance', type=float, default=10.0, 
+                       help='Distance between virtual lines in meters (default: 10.0)')
+    parser.add_argument('--line1-pos', type=float, default=0.4,
+                       help='Position of first line as ratio of frame height (0.0-1.0, default: 0.4)')
+    parser.add_argument('--line2-pos', type=float, default=0.6,
+                       help='Position of second line as ratio of frame height (0.0-1.0, default: 0.6)')
+    parser.add_argument('--no-interactive', action='store_true',
+                       help='Disable interactive line setup mode')
+    parser.add_argument('--performance-mode', choices=['fast', 'balanced', 'accurate'], 
+                       default='balanced', help='Performance mode (default: balanced)')
+    parser.add_argument('--no-plate-detection', action='store_true',
+                       help='Disable number plate detection for better performance')
+    parser.add_argument('--enable-haar', action='store_true',
+                       help='Enable Haar cascade detection (slower but more accurate)')
     
     args = parser.parse_args()
     
     try:
         tracker = CarTracker(video_path=args.video, camera_index=args.camera)
+        
+        # Customize virtual lines if specified
+        if args.line_distance != 10.0:
+            tracker.set_line_distance(args.line_distance)
+        if args.line1_pos != 0.4 or args.line2_pos != 0.6:
+            tracker.set_line_positions(args.line1_pos, args.line2_pos)
+        
+        # Performance tuning - simplified
+        if args.performance_mode == 'fast':
+            tracker.enable_plate_detection = False
+            tracker.plate_detection_frequency = 30
+            tracker.enable_haar_cascade = False
+            print("🚀 Fast performance mode enabled")
+        elif args.performance_mode == 'accurate':
+            tracker.enable_plate_detection = True
+            tracker.plate_detection_frequency = 5
+            tracker.enable_haar_cascade = True
+            print("🎯 Accurate performance mode enabled")
+        else:  # balanced
+            tracker.enable_plate_detection = True
+            tracker.plate_detection_frequency = 10
+            tracker.enable_haar_cascade = False
+            print("⚖️  Balanced performance mode enabled")
+        
+        # Override with specific flags
+        if args.no_plate_detection:
+            tracker.enable_plate_detection = False
+            print("📱 Number plate detection disabled")
+        if args.enable_haar:
+            tracker.enable_haar_cascade = True
+            print("🔍 Haar cascade detection enabled")
+        
+        # Disable interactive mode if requested
+        if args.no_interactive:
+            tracker.interactive_mode = False
+            print("Interactive mode disabled - using preset line positions")
+        
         tracker.run()
     except KeyboardInterrupt:
         print("Interrupted by user")

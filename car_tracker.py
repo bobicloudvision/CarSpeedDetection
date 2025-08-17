@@ -123,7 +123,6 @@ class CarTracker:
         # GPU acceleration and timing optimization
         self.use_gpu_acceleration = False  # Disabled by default for better compatibility
         self.frame_timing = True  # Maintain original video timing
-        self.last_frame_time = 0  # For precise timing
         self.performance_monitoring = False  # Disable performance monitoring by default for performance
         self.debug_logging = False  # Disable debug logging by default for performance
         
@@ -616,10 +615,6 @@ class CarTracker:
             elif key == ord('s') and self.interactive_mode:
                 # Skip to next frame (useful during setup)
                 continue
-            elif key == ord('g'):
-                # Toggle GPU acceleration
-                self.use_gpu_acceleration = not self.use_gpu_acceleration
-                print(f"GPU acceleration: {'ON' if self.use_gpu_acceleration else 'OFF'}")
             elif key == ord('t'):
                 # Toggle frame timing
                 self.frame_timing = not self.frame_timing
@@ -647,10 +642,6 @@ def main():
                        help='Disable interactive line setup mode')
     parser.add_argument('--confidence', type=float, default=0.5,
                        help='YOLO detection confidence threshold (0.0-1.0, default: 0.5)')
-    parser.add_argument('--no-gpu', action='store_true',
-                       help='Disable GPU acceleration for better compatibility')
-    parser.add_argument('--no-timing', action='store_true',
-                       help='Disable frame timing for maximum performance')
     parser.add_argument('--max-tracks', type=int, default=100,
                        help='Maximum number of car tracks to keep in memory (default: 100)')
     parser.add_argument('--cleanup-interval', type=int, default=60,
@@ -681,16 +672,6 @@ def main():
         if args.no_interactive:
             tracker.interactive_mode = False
             print("Interactive mode disabled - using preset line positions")
-        
-        # Disable GPU acceleration if requested
-        if args.no_gpu:
-            tracker.use_gpu_acceleration = False
-            print("GPU acceleration disabled.")
-        
-        # Disable frame timing if requested
-        if args.no_timing:
-            tracker.frame_timing = False
-            print("Frame timing disabled.")
         
         # Set new parameters
         tracker.max_track_history = args.max_tracks

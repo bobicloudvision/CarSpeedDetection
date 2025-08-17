@@ -125,7 +125,7 @@ class CarTracker:
         self.frame_timing = True  # Maintain original video timing
         self.performance_monitoring = False  # Disable performance monitoring by default for performance
         self.debug_logging = False  # Disable debug logging by default for performance
-        self.use_front_bumper = False  # Use front bumper detection instead of center
+        self.use_front_bumper = True  # Use front bumper detection by default for more accurate speed measurement
         
         # Car detection with YOLO
         try:
@@ -709,7 +709,7 @@ def main():
     parser.add_argument('--monitor', action='store_true',
                        help='Enable performance monitoring (may impact performance)')
     parser.add_argument('--front-bumper', action='store_true',
-                       help='Use front bumper detection instead of car center for more accurate speed measurement')
+                       help='Disable front bumper detection and use car center instead (front bumper is enabled by default)')
 
     
     args = parser.parse_args()
@@ -752,8 +752,8 @@ def main():
         
         # Enable front bumper detection if requested
         if args.front_bumper:
-            tracker.use_front_bumper = True
-            print("🚗 Front bumper detection enabled for more accurate speed measurement")
+            tracker.use_front_bumper = False
+            print("🚗 Front bumper detection disabled - using car center for speed measurement")
         
         tracker.run()
     except KeyboardInterrupt:

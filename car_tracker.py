@@ -1,12 +1,11 @@
 import cv2
 import numpy as np
 import pytesseract
-
 import time
 import math
 import os
-
 import argparse
+from ultralytics import YOLO
 
 class VirtualLine:
     def __init__(self, x1, y1, x2, y2, name="Line"):
@@ -88,7 +87,8 @@ class CarTracker:
         self.enable_plate_detection = True
         self.plate_detection_frequency = 10  # Check plates every N frames
         self.frame_count = 0  # Track frame count for processing decisions
-        self.strict_detection = False  # Flag for strict detection mode
+        self.confidence_threshold = 0.5  # YOLO confidence threshold
+
 
         
         # Number plate detection parameters
@@ -97,30 +97,15 @@ class CarTracker:
         
 
         
-        # Car detection cascade (optional)
-        self.car_cascade = None
+        # Car detection with YOLO
         try:
-            # First try the local cars.xml file
-            if os.path.exists('cars.xml'):
-                self.car_cascade = cv2.CascadeClassifier('cars.xml')
-                if not self.car_cascade.empty():
-                    print("✓ Loaded local car cascade file (cars.xml)")
-                else:
-                    self.car_cascade = None
-                    print("Warning: Local car cascade file is empty.")
-            # Fallback to OpenCV's built-in cascade
-            elif os.path.exists(cv2.data.haarcascades + 'haarcascade_cars.xml'):
-                self.car_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_cars.xml')
-                if not self.car_cascade.empty():
-                    print("✓ Loaded OpenCV built-in car cascade file")
-                else:
-                    self.car_cascade = None
-                    print("Warning: Built-in car cascade file is empty.")
-            else:
-                print("No car cascade file found. Using background subtraction only.")
+            # Load YOLO model for car detection
+            self.yolo_model = YOLO('yolov8n.pt')  # Use nano model for speed
+            print("✓ Loaded YOLO model (yolov8n.pt)")
         except Exception as e:
-            print(f"Warning: Could not load car cascade: {e}")
-            self.car_cascade = None
+            print(f"Error: Could not load YOLO model: {e}")
+            print("Please install ultralytics: pip install ultralytics")
+            exit(1)
         
         # Initialize video capture
         self._init_video_capture()
@@ -231,92 +216,48 @@ class CarTracker:
 
         
     def detect_cars(self, frame):
-        """Detect cars in the frame using Haar Cascade Classifier only"""
+        """Detect cars in the frame using YOLO model"""
         cars = []
+        raw_detections = 0
+        filtered_detections = 0
         
-        # Use only Haar Cascade Classifier for car detection
-        if self.car_cascade is not None:
+        # Use YOLO model for car detection
+        if self.yolo_model is not None:
             try:
-                # Convert to grayscale for better detection
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                # Run YOLO inference on the frame
+                results = self.yolo_model(frame, verbose=False)
                 
-                # Detect cars using Haar cascade with stricter parameters
-                if self.strict_detection:
-                    # Ultra-strict mode for minimal false positives
-                    cascade_cars = self.car_cascade.detectMultiScale(
-                        gray, 
-                        scaleFactor=1.2,       # Even larger scale factor
-                        minNeighbors=7,        # Very high confidence threshold
-                        minSize=(80, 80),      # Larger minimum size
-                        maxSize=(300, 300)     # Smaller maximum size
-                    )
-                else:
-                    # Standard strict mode
-                    cascade_cars = self.car_cascade.detectMultiScale(
-                        gray, 
-                        scaleFactor=1.1,       # Larger scale factor = fewer false positives
-                        minNeighbors=5,        # Higher confidence threshold
-                        minSize=(50, 50),      # Larger minimum size to avoid small objects
-                        maxSize=(400, 400)     # Smaller maximum size to avoid oversized detections
-                    )
-                
-                raw_detections = len(cascade_cars)
-                
-                # Add detected cars to list with additional filtering
-                for (x, y, w, h) in cascade_cars:
-                    # Additional size validation (more lenient)
-                    if w >= 30 and h >= 30 and w <= 500 and h <= 500:
-                        # Check aspect ratio (cars are typically wider than tall, but more flexible)
-                        aspect_ratio = w / float(h)
-                        if 0.8 <= aspect_ratio <= 4.0:  # More flexible car proportions
-                            cars.append((x, y, w, h))
-                
-                # Remove overlapping detections (keep the largest one)
-                if len(cars) > 1:
-                    cars = self._remove_overlapping_detections(cars)
-                
-                filtered_detections = len(cars)
+                # Process results
+                for result in results:
+                    boxes = result.boxes
+                    if boxes is not None:
+                        for box in boxes:
+                            # Get bounding box coordinates
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            confidence = box.conf[0].cpu().numpy()
+                            class_id = int(box.cls[0].cpu().numpy())
+                            
+                            # Filter for cars (class 2 in COCO dataset) and high confidence
+                            if class_id == 2 and confidence > self.confidence_threshold:  # Car class with configurable confidence
+                                x, y, w, h = int(x1), int(y1), int(x2 - x1), int(y2 - y1)
+                                
+                                # Additional size validation
+                                if w >= 30 and h >= 30 and w <= 800 and h <= 800:
+                                    # Check aspect ratio (cars are typically wider than tall)
+                                    aspect_ratio = w / float(h)
+                                    if 0.8 <= aspect_ratio <= 4.0:  # Flexible car proportions
+                                        cars.append((x, y, w, h))
                 
                 # Debug info (uncomment to see detection counts)
-                print(f"🔍 Raw detections: {raw_detections}, Filtered: {filtered_detections}")
+                # print(f"🚗 YOLO detected {len(cars)} cars")
                     
             except Exception as e:
-                print(f"Error in Haar cascade detection: {e}")
+                print(f"Error in YOLO detection: {e}")
                 pass
         
         return cars
     
-    def _remove_overlapping_detections(self, detections):
-        """Remove overlapping detections, keeping the largest one"""
-        if len(detections) <= 1:
-            return detections
-        
-        # Sort by area (largest first)
-        detections = sorted(detections, key=lambda d: d[2] * d[3], reverse=True)
-        
-        filtered = []
-        for detection in detections:
-            x1, y1, w1, h1 = detection
-            is_overlapping = False
-            
-            for existing in filtered:
-                x2, y2, w2, h2 = existing
-                
-                # Calculate overlap
-                overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
-                overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
-                overlap_area = overlap_x * overlap_y
-                
-                # If overlap is more than 50% of smaller detection, consider it overlapping (less strict)
-                smaller_area = min(w1 * h1, w2 * h2)
-                if overlap_area > 0.5 * smaller_area:
-                    is_overlapping = True
-                    break
-            
-            if not is_overlapping:
-                filtered.append(detection)
-        
-        return filtered
+
         
     def detect_number_plate(self, frame, car_bbox):
         """Detect number plate within car bounding box - OPTIMIZED"""
@@ -714,8 +655,9 @@ def main():
                        help='Disable interactive line setup mode')
     parser.add_argument('--no-plate-detection', action='store_true',
                        help='Disable number plate detection for better performance')
-    parser.add_argument('--strict-detection', action='store_true',
-                       help='Use even stricter car detection parameters')
+    parser.add_argument('--confidence', type=float, default=0.5,
+                       help='YOLO detection confidence threshold (0.0-1.0, default: 0.5)')
+
     
     args = parser.parse_args()
     
@@ -732,9 +674,10 @@ def main():
         if args.no_plate_detection:
             tracker.enable_plate_detection = False
             print("📱 Number plate detection disabled")
-        if args.strict_detection:
-            tracker.strict_detection = True
-            print("🔒 Strict detection mode enabled (minimal false positives)")
+        if args.confidence != 0.5:
+            tracker.confidence_threshold = args.confidence
+            print(f"🎯 YOLO confidence threshold set to {args.confidence}")
+
         
         # Disable interactive mode if requested
         if args.no_interactive:

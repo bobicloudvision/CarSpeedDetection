@@ -1,11 +1,11 @@
 import cv2
 import numpy as np
 import pytesseract
-from PIL import Image
+
 import time
 import math
 import os
-from collections import deque
+
 import argparse
 
 class VirtualLine:
@@ -72,8 +72,6 @@ class CarTracker:
         
         # Speed estimation parameters
         self.fps = 30  # Assumed FPS, will be updated from video
-        self.pixel_to_meter_ratio = 0.1  # Calibration factor
-        self.speed_history = deque(maxlen=10)
         
         # Virtual lines for speed detection
         self.virtual_lines = []
@@ -89,7 +87,6 @@ class CarTracker:
         # Performance optimization flags
         self.enable_plate_detection = True
         self.plate_detection_frequency = 10  # Check plates every N frames
-        self.enable_haar_cascade = False  # Disable by default for better performance
         self.frame_count = 0  # Track frame count for processing decisions
 
         
@@ -97,10 +94,7 @@ class CarTracker:
         self.min_plate_area = 1000
         self.max_plate_area = 50000
         
-        # Initialize background subtractor
-        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-            history=500, varThreshold=50, detectShadows=False
-        )
+
         
         # Car detection cascade (optional)
         self.car_cascade = None
@@ -233,68 +227,34 @@ class CarTracker:
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-    def preprocess_frame(self, frame):
-        """Preprocess frame for better detection"""
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Apply morphological operations
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        morph = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
-        
-        return morph
+
         
     def detect_cars(self, frame):
-        """Detect cars in the frame using multiple methods"""
+        """Detect cars in the frame using Haar Cascade Classifier only"""
         cars = []
         
-        # Method 1: Background subtraction (primary method) - OPTIMIZED
-        fg_mask = self.bg_subtractor.apply(frame)
-        
-        # OPTIMIZATION: Use smaller kernel and reduce morphological operations
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # Reduced from (5,5)
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
-        # OPTIMIZATION: Removed MORPH_OPEN operation for better performance
-        
-        # Find contours with optimized parameters
-        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # OPTIMIZATION: Process only first 20 contours to avoid slowdown
-        max_contours = min(20, len(contours))
-        for i in range(max_contours):
-            contour = contours[i]
-            area = cv2.contourArea(contour)
-            if area > 800:  # Lower threshold for better detection
-                x, y, w, h = cv2.boundingRect(contour)
-                aspect_ratio = w / float(h)
-                
-                # More flexible aspect ratio for cars
-                if 0.8 < aspect_ratio < 4.0:
-                    # Additional filtering: minimum width and height
-                    if w > 30 and h > 20:
-                        cars.append((x, y, w, h))
-        
-        # Method 2: Haar cascade (if available, as backup) - OPTIMIZED
-        if self.enable_haar_cascade and self.car_cascade is not None:
+        # Use only Haar Cascade Classifier for car detection
+        if self.car_cascade is not None:
             try:
+                # Convert to grayscale for better detection
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Detect cars using Haar cascade
                 cascade_cars = self.car_cascade.detectMultiScale(
-                    gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30)
+                    gray, 
+                    scaleFactor=1.05,      # How much to scale image between detections
+                    minNeighbors=3,        # Minimum neighbors for detection confidence
+                    minSize=(30, 30),      # Minimum car size
+                    maxSize=(500, 500)     # Maximum car size
                 )
                 
+                # Add detected cars to list
                 for (x, y, w, h) in cascade_cars:
                     cars.append((x, y, w, h))
+                    
             except Exception as e:
-                # Silently continue with background subtraction only
+                print(f"Error in Haar cascade detection: {e}")
                 pass
-        
-        # OPTIMIZATION: Simplified duplicate removal - only check if more than 5 cars
-        if len(cars) > 5:
-            # Simple area-based filtering instead of complex overlap calculation
-            cars = sorted(cars, key=lambda c: c[2] * c[3], reverse=True)[:5]
         
         return cars
         
@@ -494,19 +454,23 @@ class CarTracker:
                 if self.virtual_lines[0].check_crossing(car_center, car_id, frame_time):
                     track_info['line1_crossed'] = True
                     track_info['line1_time'] = frame_time
-                    print(f"Car {car_id} crossed Line 1 at {frame_time:.2f}s")
+                    print(f"🚗 Car {car_id} crossed Line 1 at {frame_time:.2f}s")
             
             # Check line 2 crossing
             if track_info['line1_crossed'] and not track_info['line2_crossed']:
                 if self.virtual_lines[1].check_crossing(car_center, car_id, frame_time):
                     track_info['line2_crossed'] = True
                     track_info['line2_time'] = frame_time
-                    print(f"Car {car_id} crossed Line 2 at {frame_time:.2f}s")
+                    print(f"🏁 Car {car_id} crossed Line 2 at {frame_time:.2f}s")
                     
                     # Calculate speed
                     speed = self.calculate_speed_from_lines(car_id)
                     track_info['speed'] = speed
-                    print(f"Car {car_id} speed: {speed:.1f} km/h")
+                    print(f"⚡ Car {car_id} speed: {speed:.1f} km/h")
+                    
+            # Debug: Show line crossing status
+            if track_info['line1_crossed'] and not track_info['line2_crossed']:
+                print(f"🔄 Car {car_id} waiting to cross Line 2...")
         
     def process_frame(self, frame):
         """Process a single frame for car tracking and number plate recognition"""
@@ -535,10 +499,11 @@ class CarTracker:
             cv2.putText(frame, f"ID: {track_id}", (x, y - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-            # Draw speed
-            if speed > 0:
-                cv2.putText(frame, f"Speed: {speed:.1f} km/h", (x, y + h + 20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            # Draw speed (always show, even if 0)
+            speed_text = f"Speed: {speed:.1f} km/h" if speed > 0 else "Speed: -- km/h"
+            speed_color = (255, 0, 0) if speed > 0 else (128, 128, 128)  # Red if speed > 0, gray if 0
+            cv2.putText(frame, speed_text, (x, y + h + 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, speed_color, 2)
             
             # Try to detect number plate if not already found - OPTIMIZED
             if plate_number is None and self.enable_plate_detection:
@@ -622,6 +587,11 @@ class CarTracker:
             cv2.putText(processed_frame, f"Original Timing: ON", (10, 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
+            # Add speed tracking info
+            cars_with_speed = sum(1 for track in self.car_tracks.values() if track['speed'] > 0)
+            cv2.putText(processed_frame, f"Cars with Speed: {cars_with_speed}/{len(self.car_tracks)}", (10, 175),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            
             # Add interactive mode instructions
             if self.interactive_mode:
                 if self.current_setup_line == 0:
@@ -682,12 +652,8 @@ def main():
                        help='Position of second line as ratio of frame height (0.0-1.0, default: 0.6)')
     parser.add_argument('--no-interactive', action='store_true',
                        help='Disable interactive line setup mode')
-    parser.add_argument('--performance-mode', choices=['fast', 'balanced', 'accurate'], 
-                       default='balanced', help='Performance mode (default: balanced)')
     parser.add_argument('--no-plate-detection', action='store_true',
                        help='Disable number plate detection for better performance')
-    parser.add_argument('--enable-haar', action='store_true',
-                       help='Enable Haar cascade detection (slower but more accurate)')
     
     args = parser.parse_args()
     
@@ -701,29 +667,9 @@ def main():
             tracker.set_line_positions(args.line1_pos, args.line2_pos)
         
         # Performance tuning - simplified
-        if args.performance_mode == 'fast':
-            tracker.enable_plate_detection = False
-            tracker.plate_detection_frequency = 30
-            tracker.enable_haar_cascade = False
-            print("🚀 Fast performance mode enabled")
-        elif args.performance_mode == 'accurate':
-            tracker.enable_plate_detection = True
-            tracker.plate_detection_frequency = 5
-            tracker.enable_haar_cascade = True
-            print("🎯 Accurate performance mode enabled")
-        else:  # balanced
-            tracker.enable_plate_detection = True
-            tracker.plate_detection_frequency = 10
-            tracker.enable_haar_cascade = False
-            print("⚖️  Balanced performance mode enabled")
-        
-        # Override with specific flags
         if args.no_plate_detection:
             tracker.enable_plate_detection = False
             print("📱 Number plate detection disabled")
-        if args.enable_haar:
-            tracker.enable_haar_cascade = True
-            print("🔍 Haar cascade detection enabled")
         
         # Disable interactive mode if requested
         if args.no_interactive:

@@ -121,7 +121,7 @@ class CarTracker:
         self.confidence_threshold = 0.5  # YOLO detection confidence threshold
         
         # GPU acceleration and timing optimization
-        self.use_gpu_acceleration = True
+        self.use_gpu_acceleration = False  # Disabled by default for better compatibility
         self.frame_timing = True  # Maintain original video timing
         self.last_frame_time = 0  # For precise timing
         self.performance_monitoring = False  # Disable performance monitoring by default for performance
@@ -131,22 +131,7 @@ class CarTracker:
         try:
             # Load YOLO model for car detection
             self.yolo_model = YOLO('yolov8n.pt')  # Use nano model for speed
-            
-            # Enable GPU acceleration for YOLO if available
-            if self.use_gpu_acceleration:
-                try:
-                    # Check if CUDA is available
-                    import torch
-                    if torch.cuda.is_available():
-                        self.yolo_model.to('cuda')
-                        print("✓ YOLO model loaded with GPU acceleration (CUDA)")
-                    else:
-                        print("✓ YOLO model loaded (CPU only - CUDA not available)")
-                except Exception as e:
-                    print(f"✓ YOLO model loaded (GPU acceleration failed: {e})")
-            else:
-                print("✓ YOLO model loaded (CPU mode)")
-                
+            print("✓ YOLO model loaded (yolov8n.pt)")
         except Exception as e:
             print(f"Error: Could not load YOLO model: {e}")
             print("Please install ultralytics: pip install ultralytics")
@@ -244,24 +229,9 @@ class CarTracker:
             print(f"Line positions updated: Line 1 at {self.line1_y_ratio*100:.0f}%, Line 2 at {self.line2_y_ratio*100:.0f}%")
     
     def _init_video_capture(self):
-        """Initialize video capture from file or camera with GPU optimization"""
+        """Initialize video capture from file or camera"""
         if self.video_path:
             self.cap = cv2.VideoCapture(self.video_path)
-            
-            # Enable GPU acceleration if available
-            if self.use_gpu_acceleration:
-                # Try to use CUDA backend if available
-                try:
-                    self.cap.set(cv2.CAP_PROP_CUDA_DEVICE, 0)
-                    print("✓ GPU acceleration enabled (CUDA)")
-                except:
-                    pass
-                
-                # Set hardware acceleration
-                self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-                
-                # Optimize buffer size for better performance
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         else:
             self.cap = cv2.VideoCapture(self.camera_index)
             
@@ -549,22 +519,12 @@ class CarTracker:
         return frame
         
     def run(self):
-        """Main loop for processing video with GPU optimization"""
+        """Main loop for processing video"""
         self.frame_count = 0
         start_time = time.time()
-        self.last_frame_time = start_time
         
         # Setup mouse callback for interactive line setup
         cv2.namedWindow('Car Tracker', cv2.WINDOW_NORMAL)
-        
-        # Enable GPU acceleration for display
-        if self.use_gpu_acceleration:
-            try:
-                cv2.setUseOptimized(True)
-                cv2.setNumThreads(0)  # Use all available threads
-                print("✓ OpenCV optimization enabled")
-            except:
-                pass
         
         cv2.setMouseCallback('Car Tracker', self.mouse_callback)
         
@@ -572,9 +532,6 @@ class CarTracker:
         self.start_interactive_setup()
         
         while True:
-            # Measure frame processing time
-            frame_start_time = time.time()
-            
             ret, frame = self.cap.read()
             if not ret:
                 # Video ended, exit the program
@@ -594,9 +551,6 @@ class CarTracker:
             elapsed_time = current_time - start_time
             current_fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
             
-            # Calculate processing time
-            processing_time = (current_time - frame_start_time) * 1000  # Convert to milliseconds
-            
             # Add FPS counter
             cv2.putText(processed_frame, f"Frame: {self.frame_count}", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -607,25 +561,10 @@ class CarTracker:
             cv2.putText(processed_frame, f"Line Distance: {self.line_distance_meters}m", (10, 120),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-            # Add performance info
-            cv2.putText(processed_frame, f"Processing: {processing_time:.1f}ms", (10, 150),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
             # Add speed tracking info
             cars_with_speed = sum(1 for track in self.car_tracks.values() if track['speed'] > 0)
-            cv2.putText(processed_frame, f"Cars with Speed: {cars_with_speed}/{len(self.car_tracks)}", (10, 175),
+            cv2.putText(processed_frame, f"Cars with Speed: {cars_with_speed}/{len(self.car_tracks)}", (10, 150),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            
-            # Add GPU acceleration info
-            if self.use_gpu_acceleration:
-                cv2.putText(processed_frame, f"GPU: ON", (10, 200),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            # Add memory usage info
-            if self.performance_monitoring:
-                memory_info = f"Tracks: {len(self.car_tracks)}/{self.max_track_history}"
-                cv2.putText(processed_frame, memory_info, (10, 225),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
             # Add interactive mode instructions
             if self.interactive_mode:

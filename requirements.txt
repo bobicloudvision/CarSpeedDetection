@@ -1,0 +1,8 @@
+opencv-python
+opencv-contrib-python
+numpy
+pytesseract
+Pillow
+imutils
+scikit-image
+matplotlib 
